@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -34,11 +35,33 @@ type User struct {
 	RealName string
 }
 
+// Credentials are the Slack stealth-mode auth tokens.
+type Credentials struct {
+	XoxcToken string
+	XoxdToken string
+}
+
+// ErrTokenExpired is returned by SlackClient calls when Slack reports the
+// session is no longer valid (e.g. "token_expired" or "invalid_auth"). The
+// core recognizes this sentinel without knowing Slack's JSON shape.
+var ErrTokenExpired = errors.New("slack token expired")
+
+// Authenticator obtains fresh Slack credentials from the local machine.
+type Authenticator interface {
+	Authenticate() (Credentials, error)
+}
+
+// CredentialStore persists credentials so they survive restarts.
+type CredentialStore interface {
+	SaveCredentials(Credentials) error
+}
+
 // Config represents the application configuration
 type Config struct {
 	Slack struct {
 		XoxcToken        string `json:"xoxc_token"`
 		XoxdToken        string `json:"xoxd_token"`
+		Workspace        string `json:"workspace"`
 		WorkspaceID      string `json:"workspace_id"`
 		PollIntervalSecs int    `json:"poll_interval_seconds"`
 	} `json:"slack"`
@@ -66,6 +89,9 @@ type SlackClient interface {
 
 	// GetAuthenticatedUserID returns the ID of the authenticated user
 	GetAuthenticatedUserID() string
+
+	// SetCredentials replaces the client's auth tokens (used on refresh)
+	SetCredentials(Credentials)
 }
 
 // Notifier defines the interface for sending notifications
@@ -85,21 +111,26 @@ type StateStore interface {
 
 // Monitor represents the core monitoring logic
 type Monitor struct {
-	slackClient SlackClient
-	notifier    Notifier
-	stateStore  StateStore
-	config      *Config
-	userCache   map[string]string // userID -> display name cache
+	slackClient   SlackClient
+	notifier      Notifier
+	stateStore    StateStore
+	authenticator Authenticator
+	credStore     CredentialStore
+	config        *Config
+	userCache     map[string]string // userID -> display name cache
 }
 
-// NewMonitor creates a new Monitor instance
-func NewMonitor(slackClient SlackClient, notifier Notifier, stateStore StateStore, config *Config) *Monitor {
+// NewMonitor creates a new Monitor instance. authenticator and credStore may be
+// nil, in which case automatic token refresh is disabled.
+func NewMonitor(slackClient SlackClient, notifier Notifier, stateStore StateStore, authenticator Authenticator, credStore CredentialStore, config *Config) *Monitor {
 	return &Monitor{
-		slackClient: slackClient,
-		notifier:    notifier,
-		stateStore:  stateStore,
-		config:      config,
-		userCache:   make(map[string]string),
+		slackClient:   slackClient,
+		notifier:      notifier,
+		stateStore:    stateStore,
+		authenticator: authenticator,
+		credStore:     credStore,
+		config:        config,
+		userCache:     make(map[string]string),
 	}
 }
 
