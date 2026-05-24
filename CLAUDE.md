@@ -17,14 +17,18 @@ go test ./slack/                 # Test a single package
 go build -v ./...                # CI build (mirrors .github/workflows/go.yml)
 ```
 
-Target toolchain is **Go 1.20** (`go.mod`; CI also pins 1.20). README references 1.21+, but build/CI use 1.20.
+Target toolchain is **Go 1.25** (`go.mod`; CI also pins 1.25). The `modernc.org/sqlite`
+dependency requires Go 1.25, which drove this baseline.
 
 ## Runtime configuration
 
 The binary reads `~/.slack-monitor/config.json` (see `config.example.json`) and persists
 `~/.slack-monitor/state.json`. There are **no CLI flags or env vars** for the app itself —
 all config lives in that JSON file. `loadConfig` in `cmd/slack-monitor/main.go` validates
-required tokens and applies defaults (poll interval 60s, DMs-only).
+required fields (`slack.workspace`, `notifications.ntfy_topic`) and applies defaults (poll
+interval 60s, DMs-only). The `xoxc`/`xoxd` tokens are **optional**: when absent they are
+auto-derived from the macOS Slack desktop app (see `slackauth/`) and cached back into
+`config.json`.
 
 ## Architecture
 
@@ -38,7 +42,11 @@ is essential before changing anything:
   `github.com/FourPalms/golang-slack-monitor` (package name `monitor`).
 - **`slack/`** — implements `SlackClient` against the Slack web API.
 - **`notification/`** — implements `Notifier` against ntfy.sh.
-- **`storage/`** — implements `StateStore` as atomic JSON file writes.
+- **`storage/`** — implements `StateStore` (`state.json`) and `CredentialStore` (`config.json`)
+  as atomic JSON file writes.
+- **`slackauth/`** — implements `Authenticator`; obtains `xoxc`/`xoxd` from the macOS Slack
+  desktop app (decrypts the `d` cookie via Keychain + AES, derives `xoxc` from the workspace
+  page). macOS-only (`darwin` build-tagged glue; non-darwin returns `ErrUnsupportedPlatform`).
 - **`cmd/slack-monitor/main.go`** — the ONLY place implementations are constructed and wired
   into `monitor.NewMonitor`. Add new dependencies here, not inside the core.
 
@@ -46,8 +54,10 @@ When adding behavior, define the contract as an interface in `monitor.go`, imple
 as) a subpackage, and inject it in `main.go`. Subpackages depend on root for types; root never
 imports a subpackage.
 
-**Stdlib-only constraint:** `go.mod` has zero third-party dependencies. This is intentional —
-prefer `net/http`, `encoding/json`, etc. over adding modules.
+**Near-stdlib constraint:** `go.mod` has exactly one direct third-party dependency —
+`modernc.org/sqlite` (pure Go, no CGo) — used solely by `slackauth/` to read the macOS Slack
+desktop app's Cookies database. Everything else stays stdlib (`net/http`, `encoding/json`,
+hand-rolled PBKDF2, etc.). Do not add further modules without cause.
 
 ## Non-obvious invariants (do not break)
 
@@ -71,6 +81,13 @@ prefer `net/http`, `encoding/json`, etc. over adding modules.
    current check finishes, preventing overlapping cycles. Shutdown is via `context.Context`
    cancelled on SIGINT/SIGTERM. Notifications are rate-limited to one per 2s
    (`notification/service.go`).
+
+6. **Token auto-refresh** (`monitor.go` `refreshCredentials`): when a `SlackClient` call returns
+   `ErrTokenExpired`, the run loop re-authenticates via the injected `Authenticator`, pushes new
+   tokens into the client, validates, and persists them through `CredentialStore`. `slackauth`
+   never imports `slack`; validation lives in the caller. Cookie decryption params (`saltysalt`,
+   1003 iters, AES-128-CBC, `v10` prefix, optional 32-byte domain-hash prefix) are exact —
+   don't tweak them.
 
 ## Conventions
 
