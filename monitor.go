@@ -136,8 +136,14 @@ func NewMonitor(slackClient SlackClient, notifier Notifier, stateStore StateStor
 
 // Run starts the monitoring loop
 func (m *Monitor) Run(ctx context.Context) error {
-	// Validate authentication
+	// Validate authentication; refresh once if the token is already expired.
 	userID, err := m.slackClient.TestAuth()
+	if errors.Is(err, ErrTokenExpired) {
+		if rerr := m.refreshCredentials(); rerr != nil {
+			return rerr
+		}
+		userID, err = m.slackClient.TestAuth()
+	}
 	if err != nil {
 		return err
 	}
@@ -165,8 +171,14 @@ func (m *Monitor) Run(ctx context.Context) error {
 		log.Println("Checking for new messages...")
 		cycleStart := time.Now()
 		if err := m.checkAllConversations(ctx, state); err != nil {
-			// Log error but continue monitoring
-			log.Printf("Error checking conversations: %v", err)
+			if errors.Is(err, ErrTokenExpired) {
+				if rerr := m.refreshCredentials(); rerr != nil {
+					log.Printf("Token refresh failed: %v", rerr)
+				}
+				// Next cycle retries with refreshed (or unchanged) creds.
+			} else {
+				log.Printf("Error checking conversations: %v", err)
+			}
 		}
 		cycleDuration := time.Since(cycleStart)
 
@@ -180,6 +192,31 @@ func (m *Monitor) Run(ctx context.Context) error {
 			// Next cycle will start
 		}
 	}
+}
+
+// refreshCredentials obtains fresh credentials, pushes them into the live
+// client, validates them, and persists them. It is a no-op (returning an
+// error) when no authenticator is configured.
+func (m *Monitor) refreshCredentials() error {
+	if m.authenticator == nil {
+		return fmt.Errorf("token expired but no authenticator configured")
+	}
+	log.Println("Refreshing Slack credentials...")
+	creds, err := m.authenticator.Authenticate()
+	if err != nil {
+		return fmt.Errorf("re-authentication failed: %w", err)
+	}
+	m.slackClient.SetCredentials(creds)
+	if _, err := m.slackClient.TestAuth(); err != nil {
+		return fmt.Errorf("refreshed credentials failed validation: %w", err)
+	}
+	if m.credStore != nil {
+		if err := m.credStore.SaveCredentials(creds); err != nil {
+			log.Printf("Warning: failed to persist refreshed credentials: %v", err)
+		}
+	}
+	log.Println("Slack credentials refreshed successfully")
+	return nil
 }
 
 // checkAllConversations checks all DM conversations for new messages
@@ -240,6 +277,9 @@ func (m *Monitor) checkAllConversations(ctx context.Context, state *State) error
 		}
 
 		if err := m.checkConversation(conv, state); err != nil {
+			if errors.Is(err, ErrTokenExpired) {
+				return err // surface to Run so it can refresh
+			}
 			// Log error but continue checking other conversations
 			continue
 		}
