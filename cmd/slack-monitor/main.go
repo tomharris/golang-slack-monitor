@@ -13,6 +13,7 @@ import (
 	"github.com/FourPalms/golang-slack-monitor"
 	"github.com/FourPalms/golang-slack-monitor/notification"
 	"github.com/FourPalms/golang-slack-monitor/slack"
+	"github.com/FourPalms/golang-slack-monitor/slackauth"
 	"github.com/FourPalms/golang-slack-monitor/storage"
 )
 
@@ -35,9 +36,33 @@ func main() {
 	slackClient := slack.NewClient(config.Slack.XoxcToken, config.Slack.XoxdToken)
 	notifier := notification.NewService(config.Notifications.NtfyTopic)
 	stateStore := storage.NewFileStore()
+	authenticator := slackauth.NewAuthenticator(config.Slack.Workspace)
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("Failed to get home directory: %v", err)
+	}
+	credStore := storage.NewConfigStore(filepath.Join(home, ".slack-monitor", "config.json"))
+
+	// If tokens are missing, derive them from the desktop app before starting.
+	if config.Slack.XoxcToken == "" || config.Slack.XoxdToken == "" {
+		log.Println("No tokens in config; obtaining from Slack desktop app...")
+		creds, err := authenticator.Authenticate()
+		if err != nil {
+			log.Fatalf("Failed to obtain Slack credentials: %v\nFall back to manual token entry (see README).", err)
+		}
+		slackClient.SetCredentials(creds)
+		if _, err := slackClient.TestAuth(); err != nil {
+			log.Fatalf("Obtained credentials failed validation: %v", err)
+		}
+		if err := credStore.SaveCredentials(creds); err != nil {
+			log.Printf("Warning: failed to cache credentials to config.json: %v", err)
+		}
+		log.Println("Slack credentials obtained and cached")
+	}
 
 	// Create monitor with injected dependencies
-	mon := monitor.NewMonitor(slackClient, notifier, stateStore, config)
+	mon := monitor.NewMonitor(slackClient, notifier, stateStore, authenticator, credStore, config)
 
 	// Set up context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -85,12 +110,10 @@ func loadConfig() (*monitor.Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	// Validate required fields
-	if config.Slack.XoxcToken == "" {
-		return nil, fmt.Errorf("slack.xoxc_token is required in config")
-	}
-	if config.Slack.XoxdToken == "" {
-		return nil, fmt.Errorf("slack.xoxd_token is required in config")
+	// Validate required fields. Tokens are optional: when absent they are
+	// auto-derived from the macOS Slack desktop app using slack.workspace.
+	if config.Slack.Workspace == "" {
+		return nil, fmt.Errorf("slack.workspace is required in config (your <workspace>.slack.com subdomain)")
 	}
 	if config.Notifications.NtfyTopic == "" {
 		return nil, fmt.Errorf("notifications.ntfy_topic is required in config")

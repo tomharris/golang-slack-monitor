@@ -26,6 +26,7 @@ func TestLoadConfig(t *testing.T) {
 	// Test 2: Valid config
 	validConfig := map[string]interface{}{
 		"slack": map[string]interface{}{
+			"workspace":             "acme",
 			"xoxc_token":            "test-xoxc",
 			"xoxd_token":            "test-xoxd",
 			"poll_interval_seconds": 30,
@@ -61,11 +62,13 @@ func TestLoadConfig(t *testing.T) {
 		t.Errorf("Expected poll interval 30, got %d", config.Slack.PollIntervalSecs)
 	}
 
-	// Test 3: Missing required field
+	// Test 3: Missing required field. Tokens are now optional (auto-derived),
+	// but slack.workspace is required.
 	invalidConfig := map[string]interface{}{
 		"slack": map[string]interface{}{
 			"xoxc_token": "test-xoxc",
-			// Missing xoxd_token
+			"xoxd_token": "test-xoxd",
+			// Missing workspace
 		},
 		"notifications": map[string]interface{}{
 			"ntfy_topic": "test-topic",
@@ -78,7 +81,7 @@ func TestLoadConfig(t *testing.T) {
 
 	_, err = loadConfig()
 	if err == nil {
-		t.Error("Expected error for missing required field")
+		t.Error("Expected error for missing slack.workspace")
 	}
 }
 
@@ -92,6 +95,7 @@ func TestConfigDefaults(t *testing.T) {
 	// Config without optional fields
 	minimalConfig := map[string]interface{}{
 		"slack": map[string]interface{}{
+			"workspace":  "acme",
 			"xoxc_token": "test-xoxc",
 			"xoxd_token": "test-xoxd",
 		},

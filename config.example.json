@@ -1,7 +1,8 @@
 {
   "slack": {
-    "xoxc_token": "xoxc-paste-your-xoxc-token-here",
-    "xoxd_token": "xoxd-paste-your-xoxd-token-here",
+    "workspace": "your-workspace-subdomain",
+    "xoxc_token": "",
+    "xoxd_token": "",
     "poll_interval_seconds": 60
   },
   "notifications": {

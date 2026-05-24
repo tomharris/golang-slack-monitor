@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -34,11 +35,33 @@ type User struct {
 	RealName string
 }
 
+// Credentials are the Slack stealth-mode auth tokens.
+type Credentials struct {
+	XoxcToken string
+	XoxdToken string
+}
+
+// ErrTokenExpired is returned by SlackClient calls when Slack reports the
+// session is no longer valid (e.g. "token_expired" or "invalid_auth"). The
+// core recognizes this sentinel without knowing Slack's JSON shape.
+var ErrTokenExpired = errors.New("slack token expired")
+
+// Authenticator obtains fresh Slack credentials from the local machine.
+type Authenticator interface {
+	Authenticate() (Credentials, error)
+}
+
+// CredentialStore persists credentials so they survive restarts.
+type CredentialStore interface {
+	SaveCredentials(Credentials) error
+}
+
 // Config represents the application configuration
 type Config struct {
 	Slack struct {
 		XoxcToken        string `json:"xoxc_token"`
 		XoxdToken        string `json:"xoxd_token"`
+		Workspace        string `json:"workspace"`
 		WorkspaceID      string `json:"workspace_id"`
 		PollIntervalSecs int    `json:"poll_interval_seconds"`
 	} `json:"slack"`
@@ -66,6 +89,9 @@ type SlackClient interface {
 
 	// GetAuthenticatedUserID returns the ID of the authenticated user
 	GetAuthenticatedUserID() string
+
+	// SetCredentials replaces the client's auth tokens (used on refresh)
+	SetCredentials(Credentials)
 }
 
 // Notifier defines the interface for sending notifications
@@ -85,28 +111,39 @@ type StateStore interface {
 
 // Monitor represents the core monitoring logic
 type Monitor struct {
-	slackClient SlackClient
-	notifier    Notifier
-	stateStore  StateStore
-	config      *Config
-	userCache   map[string]string // userID -> display name cache
+	slackClient   SlackClient
+	notifier      Notifier
+	stateStore    StateStore
+	authenticator Authenticator
+	credStore     CredentialStore
+	config        *Config
+	userCache     map[string]string // userID -> display name cache
 }
 
-// NewMonitor creates a new Monitor instance
-func NewMonitor(slackClient SlackClient, notifier Notifier, stateStore StateStore, config *Config) *Monitor {
+// NewMonitor creates a new Monitor instance. authenticator and credStore may be
+// nil, in which case automatic token refresh is disabled.
+func NewMonitor(slackClient SlackClient, notifier Notifier, stateStore StateStore, authenticator Authenticator, credStore CredentialStore, config *Config) *Monitor {
 	return &Monitor{
-		slackClient: slackClient,
-		notifier:    notifier,
-		stateStore:  stateStore,
-		config:      config,
-		userCache:   make(map[string]string),
+		slackClient:   slackClient,
+		notifier:      notifier,
+		stateStore:    stateStore,
+		authenticator: authenticator,
+		credStore:     credStore,
+		config:        config,
+		userCache:     make(map[string]string),
 	}
 }
 
 // Run starts the monitoring loop
 func (m *Monitor) Run(ctx context.Context) error {
-	// Validate authentication
+	// Validate authentication; refresh once if the token is already expired.
 	userID, err := m.slackClient.TestAuth()
+	if errors.Is(err, ErrTokenExpired) {
+		if rerr := m.refreshCredentials(); rerr != nil {
+			return rerr
+		}
+		userID, err = m.slackClient.TestAuth()
+	}
 	if err != nil {
 		return err
 	}
@@ -134,8 +171,14 @@ func (m *Monitor) Run(ctx context.Context) error {
 		log.Println("Checking for new messages...")
 		cycleStart := time.Now()
 		if err := m.checkAllConversations(ctx, state); err != nil {
-			// Log error but continue monitoring
-			log.Printf("Error checking conversations: %v", err)
+			if errors.Is(err, ErrTokenExpired) {
+				if rerr := m.refreshCredentials(); rerr != nil {
+					log.Printf("Token refresh failed: %v", rerr)
+				}
+				// Next cycle retries with refreshed (or unchanged) creds.
+			} else {
+				log.Printf("Error checking conversations: %v", err)
+			}
 		}
 		cycleDuration := time.Since(cycleStart)
 
@@ -149,6 +192,31 @@ func (m *Monitor) Run(ctx context.Context) error {
 			// Next cycle will start
 		}
 	}
+}
+
+// refreshCredentials obtains fresh credentials, pushes them into the live
+// client, validates them, and persists them. It is a no-op (returning an
+// error) when no authenticator is configured.
+func (m *Monitor) refreshCredentials() error {
+	if m.authenticator == nil {
+		return fmt.Errorf("token expired but no authenticator configured")
+	}
+	log.Println("Refreshing Slack credentials...")
+	creds, err := m.authenticator.Authenticate()
+	if err != nil {
+		return fmt.Errorf("re-authentication failed: %w", err)
+	}
+	m.slackClient.SetCredentials(creds)
+	if _, err := m.slackClient.TestAuth(); err != nil {
+		return fmt.Errorf("refreshed credentials failed validation: %w", err)
+	}
+	if m.credStore != nil {
+		if err := m.credStore.SaveCredentials(creds); err != nil {
+			log.Printf("Warning: failed to persist refreshed credentials: %v", err)
+		}
+	}
+	log.Println("Slack credentials refreshed successfully")
+	return nil
 }
 
 // checkAllConversations checks all DM conversations for new messages
@@ -209,6 +277,9 @@ func (m *Monitor) checkAllConversations(ctx context.Context, state *State) error
 		}
 
 		if err := m.checkConversation(conv, state); err != nil {
+			if errors.Is(err, ErrTokenExpired) {
+				return err // surface to Run so it can refresh
+			}
 			// Log error but continue checking other conversations
 			continue
 		}

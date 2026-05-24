@@ -14,7 +14,7 @@ A lightweight Go application that monitors your Slack DMs and sends phone notifi
 
 ## Prerequisites
 
-- Go 1.21 or higher
+- Go 1.25 or higher (required by the `modernc.org/sqlite` dependency)
 - A Slack workspace account
 - ntfy.sh app on your phone (free, no account needed)
 
@@ -76,11 +76,21 @@ export PATH="$HOME/bin:$PATH"
    - Example: `my-slack-monitor-89234792`
    - **Important**: Use a random suffix to prevent others from guessing your topic
 
-### Step 2: Extract Slack Tokens
+### Step 2: Slack Tokens
 
-You need two tokens from your Slack browser session. This app uses "stealth mode" authentication (same method as slack-mcp-server).
+This app uses "stealth mode" authentication (same method as slack-mcp-server), which needs an
+`xoxc` token and an `xoxd` (`d` cookie) token that work together.
 
-**Important**: Both tokens work together - you need BOTH for authentication to work.
+**Automatic (recommended, macOS + Slack desktop app):** Set `slack.workspace` to your
+`<workspace>.slack.com` subdomain and leave `xoxc_token`/`xoxd_token` empty. On first run the app
+reads the `d` cookie from the Slack desktop app, decrypts it via your Keychain (you may see a
+one-time access prompt), derives the `xoxc` token from the workspace page, validates the pair, and
+caches both tokens back into `config.json`. Expired tokens are refreshed automatically while the
+monitor runs — no more manual re-extraction.
+
+**Manual (fallback):** If automatic acquisition fails (locked Keychain, Slack changed its storage
+format, or you're not on macOS), extract the tokens by hand using DevTools as described below, and
+paste them into `config.json`.
 
 1. **Open Slack in your browser**: https://app.slack.com/client/YOUR_WORKSPACE
 
@@ -116,8 +126,9 @@ mkdir -p ~/.slack-monitor
 cat > ~/.slack-monitor/config.json << 'EOF'
 {
   "slack": {
-    "xoxc_token": "xoxc-PASTE-YOUR-XOXC-TOKEN-HERE",
-    "xoxd_token": "xoxd-PASTE-YOUR-XOXD-TOKEN-HERE",
+    "workspace": "your-workspace-subdomain",
+    "xoxc_token": "",
+    "xoxd_token": "",
     "poll_interval_seconds": 60
   },
   "notifications": {
@@ -131,9 +142,10 @@ EOF
 ```
 
 **Replace the placeholder values:**
-- `xoxc-PASTE-YOUR-XOXC-TOKEN-HERE` → Your xoxc token from Step 2.4
-- `xoxd-PASTE-YOUR-XOXD-TOKEN-HERE` → Your xoxd token from Step 2.3
+- `your-workspace-subdomain` → your `<workspace>.slack.com` subdomain (e.g. `acme` for `acme.slack.com`)
 - `your-topic-name-here` → Your ntfy.sh topic from Step 1
+- **Leave `xoxc_token`/`xoxd_token` empty** to auto-derive them (recommended). To use the manual
+  fallback instead, paste your `xoxc` token from Step 2.4 and `xoxd` token from Step 2.3.
 
 **Set secure permissions:**
 ```bash
@@ -246,8 +258,9 @@ launchctl unload ~/Library/LaunchAgents/com.user.slack-monitor.plist
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `slack.xoxc_token` | string | **Yes** | - | Slack user token (starts with `xoxc-`). Found in API request `token` parameter. |
-| `slack.xoxd_token` | string | **Yes** | - | Slack session token (starts with `xoxd-`). Found in cookie "d". |
+| `slack.workspace` | string | **Yes** | - | Your `<workspace>.slack.com` subdomain (e.g. `acme`). Used to auto-derive the `xoxc` token. |
+| `slack.xoxc_token` | string | No | auto | Slack user token (starts with `xoxc-`). Auto-derived if empty; otherwise from an API request `token` parameter. |
+| `slack.xoxd_token` | string | No | auto | Slack session token (starts with `xoxd-`). Auto-derived if empty; otherwise from cookie "d". |
 | `slack.poll_interval_seconds` | int | No | 60 | How often to check for new messages (in seconds). Minimum: 30, recommended: 60-300. |
 | `notifications.ntfy_topic` | string | **Yes** | - | Your ntfy.sh topic name. Use a random suffix for security. |
 | `monitor.dms_only` | bool | No | true | Monitor only DMs. Currently only `true` is supported. |
@@ -347,7 +360,7 @@ slack-monitor/
 ## Known Limitations
 
 - **DMs only**: Currently only monitors direct messages (no channels or @mentions)
-- **Token expiration**: No automatic token refresh (manual re-extraction required)
+- **Token expiration**: On macOS with the Slack desktop app, tokens are obtained and refreshed automatically. On other platforms, manual re-extraction is required when tokens expire.
 - **Single workspace**: Monitors one Slack workspace at a time
 
 ## License

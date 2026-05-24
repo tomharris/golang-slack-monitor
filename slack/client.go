@@ -54,7 +54,7 @@ func (c *Client) TestAuth() (string, error) {
 	}
 
 	if !response.OK {
-		return "", fmt.Errorf("Slack authentication failed: %s", response.Error)
+		return "", slackError(response.Error)
 	}
 
 	log.Printf("Authenticated as %s (%s) in workspace %s", response.User, response.UserID, response.Team)
@@ -81,7 +81,7 @@ func (c *Client) GetDMConversations() ([]monitor.Conversation, error) {
 	}
 
 	if !response.OK {
-		return nil, fmt.Errorf("Slack API error: %s", response.Error)
+		return nil, slackError(response.Error)
 	}
 
 	// Convert API response to domain types
@@ -118,7 +118,7 @@ func (c *Client) GetConversationHistory(channelID, oldestTS string) ([]monitor.M
 	}
 
 	if !response.OK {
-		return nil, fmt.Errorf("Slack API error: %s", response.Error)
+		return nil, slackError(response.Error)
 	}
 
 	// Convert API response to domain types
@@ -152,7 +152,7 @@ func (c *Client) GetUserInfo(userID string) (*monitor.User, error) {
 	}
 
 	if !response.OK {
-		return nil, fmt.Errorf("Slack API error: %s", response.Error)
+		return nil, slackError(response.Error)
 	}
 
 	// Convert API response to domain type
@@ -166,6 +166,23 @@ func (c *Client) GetUserInfo(userID string) (*monitor.User, error) {
 // GetAuthenticatedUserID returns the ID of the authenticated user
 func (c *Client) GetAuthenticatedUserID() string {
 	return c.authenticatedUserID
+}
+
+// SetCredentials replaces the client's auth tokens (used on refresh).
+func (c *Client) SetCredentials(creds monitor.Credentials) {
+	c.xoxcToken = creds.XoxcToken
+	c.xoxdToken = creds.XoxdToken
+}
+
+// slackError converts a Slack API error string into an error, mapping
+// session-expiry errors to monitor.ErrTokenExpired so the core can react.
+func slackError(apiError string) error {
+	switch apiError {
+	case "token_expired", "invalid_auth":
+		return fmt.Errorf("%w (%s)", monitor.ErrTokenExpired, apiError)
+	default:
+		return fmt.Errorf("Slack API error: %s", apiError)
+	}
 }
 
 // makeRequest makes an authenticated request to the Slack API
